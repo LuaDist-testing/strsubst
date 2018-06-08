@@ -7,13 +7,13 @@ strsubst.FOOfoo = "fofu"
 local testunit
 
 function x(str, expect)
-  str=testunit..": "..str
+  str=testunit..(testunit ~= "" and ": " or "")..str
   print("in:", str)
   local ret = strsubst(str)
   print("out:", ret)
   if expect then
-    expect = testunit..": "..expect
-    assert(ret == expect, ret .."  ~=  ".. expect)
+    expect = testunit..(testunit ~= "" and ": " or "")..expect
+    assert(ret == expect, ret.."  ~=  "..expect)
     print("ok")
   end
   print("\n")
@@ -26,9 +26,9 @@ x("$FOO", "$FOO")
 x("FOO{FOO}", "FOOFOO")
 x("f$o{ob}ar", "f$oobar")
 x("\\\\\\}\\{", "\\}{")
-
-testunit="meta"
-x("{meta={``{$FOO}}} {$meta} {$$meta}", "{$FOO} {$FOO} foo")
+x("{\\$}", "$")
+x("{$}", "$")
+x("{${}}", "")
 
 testunit="literals"
 x("{`literal}", "literal")
@@ -65,8 +65,26 @@ testunit="assign"
 x("{foo=bar}", "bar")
 x("{foo=bar~~}", "")
 x("{foo=bar~~}foo={$foo}", "foo=bar")
+x("{foo=baz}", "baz")
 
 x("{bar={$FOO{$FOO}}~~}{$bar}", "fofu")
+
+testunit="meta"
+x("{meta={``{$FOO}}} {$meta} {$$meta}", "{$FOO} {$FOO} foo")
+x("{_test:=1}{meta:={``{$_test}}}{$_test} {$$meta} {$_test}", "1 1 1")
+x("{_test:=1}{meta:={``{{$_test} $_test}}}{$_test} {$$meta} {$_test}", "1 1 1 1")
+x("{_test:=1}{meta:={``{{$_test}{_test:=2} $_test}}}{$_test} {$$meta} {$_test}", "1 1 2 1")
+
+x("{meta1={``{$_$FOO}}}", "{$_$FOO}")
+x("{foo$$meta1}", "foofoo")
+x("{$_$$meta1}", "foo")
+x("{meta2={``{$_$$meta1}}}", "{$_$$meta1}")
+x("{bar$$meta2}", "barfoo")
+
+
+x("{inner:={``{$_}}}{in$$inner}", "in")
+x("{outer:={``{$_}{in$$inner}}}{out$$outer}", "outin")
+
 
 testunit="ifelse"
 x("{?true:false}", "false")
@@ -80,6 +98,36 @@ x("{bar=}{$bar}", "")
 
 x("{{$bar}?true:false}", "false")
 x("{$bar?true:false}", "false")
+
+
+testunit="linebreaks"
+x([[{
+?true:false
+}]], "false")
+
+x([[
+yes
+{
+{
+yes
+}
+}]], "yes\nyes")
+
+
+x([[
+{
+{$condition}
+?{this}
+:{that}
+}]], "that")
+
+x([[
+{condition:=true}{
+{$condition}
+?{this}
+:{that}
+}]], "this")
+
 
 -- does it skip over unused parts
 x("{T?{true}:{!!!!}}", "true")
@@ -142,7 +190,7 @@ x("{^^fooBAR123}", "FOOBAR123")
 x("{,,fooBAR123}", "foobar123")
 
 
-testunit="comparasions"
+testunit="comparsions"
 x("{a==b}", "")
 x("{a==a}", "true")
 x("{{10.0}#=={10}}", "true")
@@ -178,6 +226,60 @@ x("{!!true1}", "")
 
 x("{!!}", "true")
 
+strsubst.__EXPLICIT = "true"
+testunit=""
+x("{explicit mode\\: {foo=bar}}", "explicit mode: bar")
+x("explicit mode: {foo=bar}", "explicit mode: {foo=bar}")
+strsubst.__EXPLICIT = ""
+
+
+testunit="partial evaluation"
+strsubst.__PARTIAL = "true"
+
+
+strsubst.foo = nil
+strsubst.bar = nil
+x("{$foo}", "{$foo}")
+x("{foo:=bar}{$foo}", "bar")
+strsubst.foo = nil
+strsubst.bar = nil
+x("{{$bar}}", "{{$bar}}")
+x("{x{$bar}y}z", "{x{$bar}y}z")
+x("{$foo{$bar}}", "{$foo{$bar}}")
+x("{bar:=baz}{$foo{$bar}}", "{$foobaz}")
+x("{foobaz:=fb}{bar:=baz}{$foo{$bar}}", "fb")
+strsubst.foo = nil
+strsubst.bar = nil
+
+x("\\{$foo\\}", "\\{$foo\\}")
+x("{rabarber/{$foo}/baz}", "{rabarber/{$foo}/baz}")
+x("{foo:=bar}{rabarber/{$foo}/baz}", "rabazber")
+strsubst.foo = nil
+strsubst.bar = nil
+
+x("{$foo?yes:no}", "{$foo?yes:no}")
+x("{foo:=true}{$foo?yes:no}", "yes")
+x("{foo:=}{$foo?yes:no}", "no")
+strsubst.foo = nil
+strsubst.bar = nil
+
+x("{{$foo}:f:fooo}", "{{$foo}:f:fooo}")
+x("{$foo:f:fooo}", "{$foo:f:fooo}")
+strsubst.foo = nil
+strsubst.bar = nil
+
+x("{{$foo}||true}", "{{$foo}||true}")
+x("{{$foo}&&true}", "{{$foo}&&true}")
+x("{$foo||true}", "{$foo||true}")
+x("{$foo&&true}", "{$foo&&true}")
+strsubst.foo = nil
+strsubst.bar = nil
+
+strsubst.__PARTIAL = ""
+
+
+testunit="recursion"
+x("{foo:={``{$$foo}}}{$$foo}")
 
 -- yes I test the examples from the documentation
 testunit="documentation examples"
@@ -191,3 +293,6 @@ os.execute(
 dofile('gentest.lua')
 
 
+
+
+-- api tests

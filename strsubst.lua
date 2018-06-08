@@ -26,24 +26,48 @@ local punct = "-$%&/=?`@+*~#,;.:<>|^!"
 -- the variables
 local strsubst_vars = {
   -- only the initial variable table holds these, the names conflict with temporary vars, but that doesn't matter
-  _VERSION     = "strsubst 0.2",
+  _VERSION     = "strsubst 0.3-devel",
   _LICENSE     = "GPL2+",
   _COPYRIGHT   = "Copyright (C) 2015 Christian Thäter <ct@pipapo.org>",
   _DESCRIPTION = "String Substitution Engine",
 }
 
 local function prepare_vartable()
+  --configvars:
+  --: `__BACKSLASH __BRACEOPEN __BRACECLOSE`::
+  --:   Used for the escaping mechanism. Must not be changed.
   strsubst_vars.__BACKSLASH = "{$__BACKSLASH}"
   strsubst_vars.__BRACEOPEN = "{$__BRACEOPEN}"
   strsubst_vars.__BRACECLOSE = "{$__BRACECLOSE}"
+  --: `__IMMUTABLE`::
+  --:   A Lua pattern matching immutable variables. Defaults to
+  --:   all uppercase (plus digits and underscores) names only.
   strsubst_vars.__IMMUTABLE = strsubst_vars.__IMMUTABLE or "^[A-Z0-9_]*$"
+  --: `__TEMPORARY`::
+  --:   A Lua pattern matching temporary variables. Defaults to
+  --:   names starting with a underscore.
   strsubst_vars.__TEMPORARY = strsubst_vars.__TEMPORARY or "^_"
+  --: `__PARAMETER`::
+  --:   The variable name for the single parameter passed to metaevaluation. Defaults to
+  --:   to '_'.
+  strsubst_vars.__PARAMETER = strsubst_vars.__PARAMETER or "_"
+  --: `__EXPLICIT`::
+  --:   Flag when set to anyting but the empty string ("") then explicit mode is turned on.
+  --:   Strsubst only operates on strings starting with a '{' then.
+  strsubst_vars.__EXPLICIT = strsubst_vars.__EXPLICIT or ""
+  --: `__PARTIAL`::
+  --:   If set to anyting but the empty string ("") then partial evaluation mode is turned on.
+  --:   In partial evaluation mode expressions are only evaluated as much as it is known, unknown
+  --:   variables are kept as variable expansion expression `{$varname}`, expressions surounding
+  --:   partial evaluated variables are retained for later evaluation.
+  strsubst_vars.__PARTIAL = strsubst_vars.__PARTIAL or ""
 end
+
+
 
 prepare_vartable()
 
 local strsubst_vars_tmp
-
 
 -- Tokenizer patterns:
 -- don't evaluate
@@ -53,10 +77,10 @@ local literal = {"([^{]*)(%b{})", "(.*)"}
 -- treat operators including braced expressions literally, braces must still match!
 local literalrec = {"(.*)", "(.*)"}
 -- normal evaluation
-local evaluate = {"([^{]*)(%b{})", "(["..punct.."]*)([^"..punct.."]*)"}
+local evaluate = {"\r?\n?([^{]-)\r?\n?(%b{})", "(["..punct.."]*)([^"..punct.."]*)"}
 
 local function strsubst_tokenize(text, tokenize)
-  -- add a {} at the end to make the tokenizer pattern happy (there is no '%b{}?' for optional parens)
+  -- add a {} at the end to make the tokenizer pattern happy (there is no '%b{}?' for optional braces)
   text = text.."{}"
 
   local tokenized = {}
@@ -96,37 +120,78 @@ local function strsubst_intern(text, operators)
   local result = ""
   local buf = ""
   local infixfn
+  local prefix = ""
+  local infixop = ""
+  local partial
 
   for i=1, #tokenized do
     local op = operators[tokenized[i]]
 
-    if op then
+    if op and not partial then
       if infixfn then
-        result = infixfn(result, buf)
+        local r = infixfn(result, buf)
+        if r then
+          result = r
+        else
+          result = prefix..result..infixop..buf
+          partial = true
+        end
         buf = ""
       end
       infixfn = op.infix
-      result = result .. buf
+      if infixfn then
+        infixop = tokenized[i]
+      end
+
+      result = result..buf
       buf = ""
 
       if op.postfix then
-        result, operators = op.postfix(result)
-        operators = operators or strsubst_operators
+        if not partial then
+          prefix = result..tokenized[i]
+          result, operators = op.postfix(result)
+          operators = operators or strsubst_operators
+        else
+          result = result..tokenized[i]
+          infixop = ""
+        end
       end
+
     elseif operators.tokenize ~= literalrec and operators.tokenize ~= skip and tokenized[i]:match("^{") then
-      buf = buf .. strsubst_intern(tokenized[i]:sub(2,-2), strsubst_operators)
+      local r, p = strsubst_intern(tokenized[i]:sub(2,-2), strsubst_operators)
+      partial = partial or p
+      if p then
+        buf = buf.."{"..r.."}"
+      else
+        buf = buf..r
+      end
+
     elseif operators.tokenize ~= skip then
-      buf=buf..tokenized[i]
+      buf = buf..tokenized[i]
     end
   end
 
   if infixfn then
-    result = infixfn(result, buf)
+    if not partial then
+      local r = infixfn(result, buf)
+      if r then
+        result = r
+      else
+        result = prefix..result..infixop..buf
+        partial = true
+      end
+    else
+      result = result..infixop..buf
+    end
   else
-    result = result .. buf
+    result = result..buf
   end
 
-  return result
+  if partial then
+    return prefix..result, partial
+  else
+    return result, partial
+  end
 end
 
 
@@ -155,7 +220,7 @@ end
 --: Syntax
 --: ~~~~~~
 --:
---: The input text is tokenized into braced expressions (Top level Text is always treated as literal text). The
+--: The input text is tokenized into braced expressions (Top level text is always treated as literal text). The
 --: subexpressions are tokenized at nopunct/punctuation character transitions and nested subexpressions.
 --: Each sequence of punctuation characters becomes a candidate for operator evaluation. If no matching operator exists
 --: then the characters are returned literally. A subexpression which only contains a single punctuation character will always
@@ -168,12 +233,20 @@ end
 --: This set of punctuation characters does not contain all the characters the 'C' Locale would define, notably
 --: no parentheses, no quotation marks and not the underscore.
 --:
+--: To make expressions more readable, a single "\r?\n?" in front of '}' and after '{' will be removed to write
+--: expressions on multiple lines:
+--:
+--:  {
+--:  {$condition}
+--:  ?{this}
+--:  :{that}
+--:  }
 --:
 --: Evaluation
 --: ~~~~~~~~~~
 --:
 --: Text is evaluated left to right, one operator at a time, when a operand contains a subexpressions these are
---: evaluated recursively and their result is inderted into the surounding text. If one wants to change the
+--: evaluated recursively and their result is inserted into the surounding text. If one wants to change the
 --: evaluation order then braces must be used.
 --:
 --:  strsubst "{first=second$third}}"
@@ -185,6 +258,7 @@ end
 --: The assignment to 'first' will recursively evaluate the subexpression with the text 'second' and append
 --: the value of variable 'third' to it.
 --:
+--: Generally it is always a good idea to use braces a lot to make things explicit without ambiguity.
 --:
 --: Variables
 --: ~~~~~~~~~
@@ -197,8 +271,8 @@ end
 --:  can be assigned and reassigned from within expressions.
 --:
 --: implementation defined variables::
---:  Start with two underscores, strsubst stores some internal configuration and special
---:  variables this way. Some can be reconfigured from the lua api.
+--:  Start with two underscores (this is hardcoded), strsubst stores some internal configuration
+--:  and special variables. Some can be used to reconfigure the semantics from the lua api.
 --:
 --: immutable variables::
 --:  Names containing (by default) only uppercase characters, digits and the underscore,
@@ -212,6 +286,12 @@ end
 --:
 --: The lua api is free to change/define any kinds of variables without restrictions.
 --:
+--: Configuration Variables
+--: ^^^^^^^^^^^^^^^^^^^^^^^
+--:
+--: Following configuration variables are used by the strsubst engine and can be used to configure certain aspects:
+--:
+--=configvars
 --:
 --: Examples
 --: ~~~~~~~~
@@ -223,7 +303,7 @@ end
 --:
 --:  strsubst "Only text {here.}" == "Only text here."
 --:
---: Undefined variables return an empty string
+--: Undefined variables return an empty string (unless in partial evaluation mode)
 --:
 --:  strsubst "You see {$nothing}" == "You see "
 --:
@@ -239,7 +319,7 @@ end
 --:  strsubst "{foo:=bar}" == ""
 --:  strsubst "{foo=bar}" == "bar"
 --:
---: Normally variables are global and their definition is retained
+--: Normal variables are global and their definition is retained
 --:
 --:  strsubst "assigned above: {$foo}" == "assigned above: bar"
 --:
@@ -257,12 +337,19 @@ end
 --:
 --:  strsubst "{__IMMUTABLE=hack the system}" == "^[A-Z0-9_]*$"
 --:
---: The '$$' operator calls a recursive substr evaluation on a variable, this way one can
---: create simple macros taking parameters in (temporary) variables.
+--: The '$$' operator calls a recursive substr evaluation on a variable, the lvalue of $$ is stored in '{$_}'
+--: (configureable in __PARAMETER) this way one can create simple macros
+--:
+--:  strsubst "{macro={``{got $_}}}" == "{got $_}"
+--:  strsubst "{parameter$$macro}" == "got parameter"
+--:
+--: named parameter can be passed in in (temporary) variables.
 --:
 --:  strsubst "{macro={``{_tmp is $_tmp}}}" == "{_tmp is $_tmp}"
 --:  strsubst "{_tmp:=first$$macro}" == "_tmp is first"
 --:  strsubst "{_tmp:=second$$macro}" == "_tmp is second"
+--:
+--: Metacalls which are recursive will eventually yield an error which is passed up as result of the evaluation.
 --:
 --: The '~~' postfix operator discards its operand, but side effects are evaluated
 --:
@@ -278,7 +365,7 @@ end
 --:
 --:  strsubst "{foo:=bar}{ooh:=o}{foo is ${f{{$ooh}{o}}}}" == "foo is bar"
 --:
---: In logic only empty strings count as *false*, everything else ist *true*. Comparsions in turn return either a empty string
+--: In logic only empty strings count as *false*, everything else ist *true*. Comparsions return either a empty string
 --: or the string 'true'.
 --:
 --:  strsubst "{a==b}" == ""
@@ -297,8 +384,7 @@ end
 --:  strsubst "{0xbabe#*1e-1}" == "4780.6"
 --:  strsubst "{1#/0}" == "inf"
 --:
---: Everything, even arithmetic is evaluated left to right with recursing into subexpressions first,
---: there is no operator precedence
+--: Everything, even arithmetic is evaluated left to right there is no operator precedence
 --:
 --:  strsubst "{1#+2#*3}" == "9"
 --:  strsubst "{1#+{2#*3}}" == "7"
@@ -328,25 +414,40 @@ end
 --:
 --=license
 --:
-local function strsubst(text)
+local function strsubst(text, tmpvars)
+  if strsubst_vars.__EXPLICIT ~= "" and not text:match("^{") then
+    return text
+  end
   -- expand character escapes
-  text = text:gsub("\\([{}\\])",
-                   {
-                     ["\\"] = "{$__BACKSLASH}",
-                     ["{"] = "{$__BRACEOPEN}",
-                     ["}"] = "{$__BRACECLOSE}",
-                   }
-  ):gsub("\\(["..punct.."])", "{%1}")
+  if strsubst_vars.__PARTIAL ~= "" then
+    text = text:gsub("\\([{}\\])",
+                     {
+                       ["\\"] = "{$__BACKSLASH}{$__BACKSLASH}",
+                       ["{"] = "{$__BACKSLASH}{$__BRACEOPEN}",
+                       ["}"] = "{$__BACKSLASH}{$__BRACECLOSE}",
+                     }
+    ):gsub("\\(["..punct.."])", "{%1}")
+  else
+    text = text:gsub("\\([{}\\])",
+                     {
+                       ["\\"] = "{$__BACKSLASH}",
+                       ["{"] = "{$__BRACEOPEN}",
+                       ["}"] = "{$__BRACECLOSE}",
+                     }
+    ):gsub("\\(["..punct.."])", "{%1}")
+  end
 
   -- existing tmp variables are available to metacalls
   local tmp = strsubst_vars_tmp
-  strsubst_vars_tmp = setmetatable(strsubst_vars_tmp or {},
+  strsubst_vars_tmp = setmetatable(tmpvars or {},
     {
-      __index = strsubst_vars
+      __index = strsubst_vars_tmp or strsubst_vars
     }
   )
 
-  text = strsubst_intern(text, {tokenize = literal})
+  local ok, partial
+  --text, partial = strsubst_intern(text, {tokenize = literal})
+  ok, text, partial = pcall(strsubst_intern, text, {tokenize = literal})
 
   strsubst_vars_tmp = tmp
 
@@ -357,7 +458,7 @@ local function strsubst(text)
                       __BRACEOPEN = "{",
                       __BRACECLOSE = "}",
                     }
-  ))
+  )), partial
 end
 
 
@@ -396,18 +497,29 @@ strsubst_operators["~~"] = {
 --: Expands to the value of variable 'var'. When 'var' is not defined, expands to an empty string.
 strsubst_operators["$"] = {
   infix = function(lval, rval)
-    return lval..(strsubst_vars_tmp[rval] or "")
+    -- if strsubst_vars.__PARTIAL ~= ""  or strsubst_vars_tmp[rval] or rval == "" then
+    if strsubst_vars.__PARTIAL == "" or strsubst_vars_tmp[rval]  then
+      return lval..(strsubst_vars_tmp[rval] or "")
+    else
+      return nil
+    end
   end
 }
 
 --strsubst:variable
---: .{$$var}
+--: .{param$$var}
 --: Meta expansion to the value of variable 'var'. When 'var' is not defined, expands to an empty string.
---: Expressions within the variable are expanded recursively. Temporary variables from the calling
+--: Expressions within the variable value are expanded recursively. Temporary variables from the calling
 --: environment are available. Temporary variables defined inside the expansion are deleted at return.
+--: the 'param' is passed passed in the variable '_' as temporary variable. This name can be changed
+--: with the '__PARAMETER' variable.
 strsubst_operators["$$"] = {
   infix = function(lval, rval)
-    return lval..(strsubst(strsubst_vars_tmp[rval] or ""))
+    if strsubst_vars.__PARTIAL == "" or strsubst_vars_tmp[rval]  then
+      return strsubst(strsubst_vars_tmp[rval] or "", {[strsubst_vars.__PARAMETER] = lval})
+    else
+      return nil
+    end
   end
 }
 
@@ -452,16 +564,18 @@ strsubst_operators[":="] = {
 strsubst_operators["?"] = {
   postfix = function(val)
     if val ~= "" then
-      return "", {
+      return "",
+      {
         tokenize = evaluate,
         [":"] = {
           postfix = function (val)
             return val, {tokenize = skip}
           end
         },
-                 }
+      }
     else
-      return "", {
+      return "",
+      {
         tokenize = skip,
         [":"] = {
           postfix = function (val)
@@ -471,7 +585,7 @@ strsubst_operators["?"] = {
             return rval
           end
         }
-                 }
+      }
     end
   end
 }
@@ -534,7 +648,7 @@ strsubst_operators["/"] = {
       tokenize = evaluate,
       ["/"] = {
         infix = function (lval, rval)
-          return val:gsub(lval, rval, 1)
+          return (val:gsub(lval, rval, 1))
         end
       }
     }
@@ -551,7 +665,7 @@ strsubst_operators["//"] = {
       tokenize = evaluate,
       ["/"] = {
         infix = function (lval, rval)
-          return val:gsub(lval, rval)
+          return (val:gsub(lval, rval))
         end
       }
     }
@@ -614,7 +728,7 @@ strsubst_operators["&&"] = {
 --: Logic NOT operator. When 'x' is false (empty string) then "true" is returned, otherwise an empty string is returned
 strsubst_operators["!!"] = {
   infix = function(lval, rval)
-    return lval.. ( rval ~= "" and "" or "true")
+    return lval..( rval ~= "" and "" or "true")
   end,
 }
 
@@ -732,6 +846,18 @@ strsubst_operators["@"] = {
 }
 
 
+--strsubst:
+--: .{text@@func}
+--: call user defined funcion
+--strsubst_operators["@@"] = {
+--  infix = function(lval, rval)
+--    return string.format(rval, lval)
+--  end,
+--}
+
+
+
+
 -- arithmetic
 --strsubst:
 --: .{x#+y}
@@ -842,7 +968,7 @@ return setmetatable (
         --strsubst_api:operator
         --: `strsubst[name] = definition`::
         --:
-        --:   When the 'name' matches the 'punct' pattern (operatornames) and definition is a table or nil an operator is
+        --:   When the 'name' matches the 'punct' pattern (operator names) and definition is a table or nil an operator is
         --:   modified.
         --:
         --:   Extends the engine with a new custom defined operator.
@@ -857,7 +983,8 @@ return setmetatable (
         --:      operators. Refer to the strsubst source for details.
         --:    `infix`::
         --:      A function with is called with the left and right operands and return the result
-        --:      of the operation.
+        --:      of the operation. May return 'nil' in partial evaluation mode to signify that the operation
+        --:      can not be evaluated at this time.
         --:
         --:    The operands are always strings or numbers.
         --:
@@ -867,13 +994,24 @@ return setmetatable (
     end,
 
 
-    __call = function(_, op)
+    __call = function(_, op, ...)
       assert(type(op) == 'string' or type(op) == 'table')
       if type(op) == 'string' then
         --strsubst_api:call
         --: `strsubst "text"`::
-        --:   Calls the subtitution engine, returns the result of replaceing expressions in 'text'.
-        return strsubst(op)
+        --: `strsubst("text", {tmpvars})`::
+        --:   Calls the subtitution engine,'tmpvars' can be used to pass a optional table of temporary variables for this call.
+        --:   Returns the result of replacing expressions in 'text' and a optional second return which is 'true' when in partial
+        --:   evaluation mode the expression could not be completely evaluated.
+        local tmpvars = ...
+        if tmpvars then
+          assert(type(tmpvars) == 'table')
+          for k,v in pairs(tmpvars) do
+            assert(type(k) == 'string' and (type(v) == 'string' or type(v) == 'number'))
+          end
+        end
+
+        return strsubst(op, tmpvars)
       else
         --strsubst_api:vartable
         --: `strsubst {newvars}`::
