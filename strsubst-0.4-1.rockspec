@@ -1,9 +1,17 @@
+-- This file was automatically generated for the LuaDist project.
+
 package = "strsubst"
-version = "0.3-1"
+version = "0.4-1"
+-- LuaDist source
 source = {
-   url = "git://git.pipapo.org/luastrsubst",
-   tag = "v0.3"
+  tag = "0.4-1",
+  url = "git://github.com/LuaDist-testing/strsubst.git"
 }
+-- Original source
+-- source = {
+--    url = "git://git.pipapo.org/luastrsubst",
+--    tag = "v0.4"
+-- }
 description = {
    summary = "String substitution engine",
    detailed = [[

@@ -23,10 +23,12 @@ local NaN = math.abs(0/0)
 -- the 'C' Locale would define are used here, notably no parentheses, no quotation marks and not the underscore
 local punct = "-$%&/=?`@+*~#,;.:<>|^!"
 
+--PLANNED: operator aliases
+
 -- the variables
 local strsubst_vars = {
-  -- only the initial variable table holds these, the names conflict with temporary vars, but that doesn't matter
-  _VERSION     = "strsubst 0.3-devel",
+  -- only the initial variable table holds these, the names conflict with temporary vars, but that should't matter
+  _VERSION     = "strsubst 0.4",
   _LICENSE     = "GPL2+",
   _COPYRIGHT   = "Copyright (C) 2015 Christian Thäter <ct@pipapo.org>",
   _DESCRIPTION = "String Substitution Engine",
@@ -349,6 +351,15 @@ end
 --:  strsubst "{_tmp:=first$$macro}" == "_tmp is first"
 --:  strsubst "{_tmp:=second$$macro}" == "_tmp is second"
 --:
+--: The '$$$' operator calls a indirect recursive substr evaluation on a variable,
+--: the lvalue of $$ is stored in '{$_}', unlike the '$$' operator the rvalue is
+--: evaluated to produce a new variable name like "{lvalue$${lvalue$$rvalue}}" would do.
+--:
+--:  strsubst "{foo_bar:={``foobar selected}}" == ""
+--:  strsubst "{select:=bar}" == ""
+--:  strsubst "{foo:={foo_$select}}" == ""
+--:  strsubst "{$$$foo}" == "foobar selected"
+--:
 --: Metacalls which are recursive will eventually yield an error which is passed up as result of the evaluation.
 --:
 --: The '~~' postfix operator discards its operand, but side effects are evaluated
@@ -517,6 +528,28 @@ strsubst_operators["$$"] = {
   infix = function(lval, rval)
     if strsubst_vars.__PARTIAL == "" or strsubst_vars_tmp[rval]  then
       return strsubst(strsubst_vars_tmp[rval] or "", {[strsubst_vars.__PARAMETER] = lval})
+    else
+      return nil
+    end
+  end
+}
+
+
+--strsubst:variable
+--: .{param$$$var}
+--: Meta expansion of variable 'var' with one extra layer of indirection.
+--: Same as "{param$${param$$var}}".
+strsubst_operators["$$$"] = {
+  infix = function(lval, rval)
+    if strsubst_vars.__PARTIAL == "" or strsubst_vars_tmp[rval]  then
+      return strsubst
+      (
+        strsubst_vars_tmp
+        [
+          (strsubst(strsubst_vars_tmp[rval],{[strsubst_vars.__PARAMETER] = lval})) or ""
+        ] or "",
+        {[strsubst_vars.__PARAMETER] = lval}
+      )
     else
       return nil
     end
@@ -729,6 +762,16 @@ strsubst_operators["&&"] = {
 strsubst_operators["!!"] = {
   infix = function(lval, rval)
     return lval..( rval ~= "" and "" or "true")
+  end,
+}
+
+-- comparisons
+--strsubst:matching
+--: .{text=~pattern}
+--: Returns "true" when 'text' matches 'pattern' are equal, otherwise an empty string.
+strsubst_operators["=~"] = {
+  infix = function(lval, rval)
+    return lval:match(rval) and "true" or ""
   end,
 }
 

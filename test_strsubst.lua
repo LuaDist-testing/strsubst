@@ -190,6 +190,12 @@ x("{^^fooBAR123}", "FOOBAR123")
 x("{,,fooBAR123}", "foobar123")
 
 
+testunit="string match"
+x("{a=~b}", "")
+x("{=~}", "true")
+x("{=~none}", "")
+x("{none=~{^$}}", "")
+
 testunit="comparsions"
 x("{a==b}", "")
 x("{a==a}", "true")
